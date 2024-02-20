@@ -1,7 +1,7 @@
 bl_info = {
 	"name": "VF Render Lottie",
 	"author": "John Einselen",
-	"version": (0, 6, 0),
+	"version": (0, 7, 0),
 	"blender": (3, 6, 0),
 	"location": "Render > Render Lottie",
 	"description": "Renders polygons as animated shapes in Lottie JSON format",
@@ -57,8 +57,10 @@ class VF_renderLottie(bpy.types.Operator):
 		start = scene.frame_start
 		end = scene.frame_end
 		frame_original = scene.frame_current
-		float_position = 2
-		float_color = 4
+		position_precision = 1
+#		position_frames = 5
+		color_precision = 4
+#		color_frames = 10
 		fill_color_string = "Lottie_Fill_Color"
 		stroke_color_string = "Lottie_Stroke_Color"
 		stroke_width_string = "Lottie_Stroke_Width"
@@ -115,10 +117,23 @@ class VF_renderLottie(bpy.types.Operator):
 		
 		# Create layer
 		layer = an.add_layer(objects.ShapeLayer())
-		layer.name = obj.name
-		layer.width = width
-		layer.height = height
-		layer.size = Point(width, height)
+#		layer.name = obj.name
+#		layer.width = width
+#		layer.height = height
+#		layer.size = Point(width, height)
+		
+		# Track elements that will created for each polygon
+		paths_dict = {}
+		fills_dict = {}
+		
+		# Track history of elements (keyframes are added only if changes are detected)
+		bez_hist = []
+		bez_frame = []
+		rgb_hist = []
+		rgb_frame = []
+		
+		# TODO implement linear versus hold keyframes, so changes after multiple frames without changes are detected and set to hold
+		# Hold is preferable to linear over two frames due to high frame rate interpolation (similar to issues in Unity)
 		
 		# Process timeline
 		for i in range(end - start):
@@ -133,20 +148,33 @@ class VF_renderLottie(bpy.types.Operator):
 			for polygon in mesh.polygons:
 				pi = polygon.index
 				
-				# Get path data
+				# Get path data as Bezier path
 				bez = objects.Bezier()
 				bez.close()
+				bez_arr = []
 				for i in polygon.vertices:
 					# Get world position (3D)
 					wpos = obj.matrix_world @ mesh.vertices[i].co
 					# Get render position (2D)
 					rpos = bpy_extras.object_utils.world_to_camera_view(scene, cam, wpos)
+					# Reduce precision and flip Y
+					xy = [round(rpos.x * width, position_precision), round((1.0 - rpos.y) * height, position_precision)]
 					# Add point to path (Y is flipped)
-					bez.add_point(Point(round(rpos.x * width, float_position), round((1.0 - rpos.y) * height, float_position)))
+					bez.add_point(Point(xy[0], xy[1]))
+					# Add to array
+					bez_arr.append(xy)
 				
-				# Get fill data
-				rgba = mesh.attributes[fill_color_string].data[pi].color
+				# Get fill data as Color object
+				rgb = linear2srgb(mesh.attributes[fill_color_string].data[pi].color)
+				# Replace with reduced precision array
+				rgb = [round(rgb[0], color_precision), round(rgb[1], color_precision), round(rgb[2], color_precision)]
+				# Add to array
+				rgb_arr = []
+				rgb_arr.append(rgb[0])
+				rgb_arr.append(rgb[1])
+				rgb_arr.append(rgb[2])
 				
+				# First frame
 				if (frame == start):
 					# Create polygon group
 					group = layer.add_shape(objects.Group())
@@ -156,20 +184,95 @@ class VF_renderLottie(bpy.types.Operator):
 					path.shape.value = bez
 					
 					# Get color data and create fill
-					fill = group.add_shape(objects.Fill(Color(round(rgba[0], float_color), round(rgba[1], float_color), round(rgba[2], float_color))))
+					fill = group.add_shape(objects.Fill(Color(rgb[0], rgb[1], rgb[2])))
+					
+					# Store references to path and fill in dictionaries
+					paths_dict[pi] = path
+					fills_dict[pi] = fill
+					
+					bez_hist.append(bez_arr)
+					rgb_hist.append(rgb_arr)
 				
+				# Subsequent frames
 				else:
+					# Reference previously created path and fill from dictionaries
+					path = paths_dict[pi]
+					fill = fills_dict[pi]
+					
 					# Add keyframes
-					path.shape.add_keyframe(frame, bez)
-					fill.color.add_keyframe(frame, Color(round(rgba[0], float_color), round(rgba[1], float_color), round(rgba[2], float_color)))
+					if (bez_hist[pi] != bez_arr):
+#						print("")
+#						print("history: ", bez_hist[pi][0])
+#						print("new:     ", bez_arr[0])
+#						print("")
+						path.shape.add_keyframe(frame, bez)
+					if (rgb_hist[pi] != rgb_arr):
+#						print("")
+#						print("history: ", rgb_hist[pi])
+#						print("new:     ", rgb_arr)
+#						print("")
+						fill.color.add_keyframe(frame, Color(rgb[0], rgb[1], rgb[2]))
+				
+				# Store history references
+				bez_hist[pi] = bez_arr
+				rgb_hist[pi] = rgb_arr
+				
+				# Remove temp variables
+				del bez, bez_arr, rgb, rgb_arr
 		
 		# Export Lottie JSON file
 		export_lottie(an, filepath)
 		
 		# Reset timeline to original frame number
-		scene.frame_set(frame_original)
+#		scene.frame_set(frame_original)
 		
 		return {'FINISHED'}
+
+
+
+###########################################################################
+# Linear and sRGB conversion functions
+
+# References:
+# https://blenderartists.org/t/help-please-is-there-a-fast-way-to-convert-srgb-values-to-linear/631849/25
+# http://www.cyril-richon.com/blog/2019/1/23/python-srgb-to-linear-linear-to-srgb
+# https://entropymine.com/imageworsener/srgbformula/
+
+def s2l(s):
+	if s <= 0.0:
+		return 0.0
+#	elif s <= 0.0404482362771082: # improved accuracy but may not conform to sRGB standards
+	elif s <= 0.04045:
+		return s / 12.92
+	elif s < 1.0:
+		return ((s + 0.055) / 1.055) ** 2.4
+	else:
+		return 1.0
+	
+def l2s(l):
+	if l <= 0.0:
+		return 0.0
+#	elif l <= 0.00313066844250063: # improved accuracy but may not conform to sRGB standards
+	elif l <= 0.00313080:
+		return l * 12.92
+	elif l < 1.0:
+		return ((l ** (1.0 / 2.4)) * 1.055) - 0.055
+	else:
+		return 1.0
+	
+def srgb2linear(rgba):
+	# Convert RGB values (not Alpha)
+	for i in range(3):
+		rgba[i] = s2l(rgba[i])
+	return rgba
+
+def linear2srgb(rgba):
+	# Convert RGB values (not Alpha)
+	for i in range(3):
+		rgba[i] = l2s(rgba[i])
+	return rgba
+
+
 
 ###########################################################################
 # User preferences and UI rendering class
@@ -186,6 +289,8 @@ class RenderLottiePreferences(bpy.types.AddonPreferences):
 		layout = self.layout
 		layout.label(text="Addon Default Preferences")
 
+
+
 ###########################################################################
 # UI rendering classes
 
@@ -195,6 +300,8 @@ def vf_prepend_menu_renderLottie(self,context):
 		layout.operator(VF_renderLottie.bl_idname, text="Render Lottie JSON", icon='FILE') # RENDER_ANIMATION
 	except Exception as exc:
 		print(str(exc) + " | Error in Topbar Mt Render when adding to menu")
+
+
 
 ###########################################################################
 # Addon registration functions
