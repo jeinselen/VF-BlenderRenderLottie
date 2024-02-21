@@ -1,7 +1,7 @@
 bl_info = {
 	"name": "VF Render Lottie",
 	"author": "John Einselen",
-	"version": (0, 7, 0),
+	"version": (0, 7, 2),
 	"blender": (3, 6, 0),
 	"location": "Render > Render Lottie",
 	"description": "Renders polygons as animated shapes in Lottie JSON format",
@@ -57,22 +57,22 @@ class VF_renderLottie(bpy.types.Operator):
 		start = scene.frame_start
 		end = scene.frame_end
 		frame_original = scene.frame_current
-		position_precision = 1
-#		position_frames = 5
-		color_precision = 4
-#		color_frames = 10
-		fill_color_string = "Lottie_Fill_Color"
-		stroke_color_string = "Lottie_Stroke_Color"
-		stroke_width_string = "Lottie_Stroke_Width"
+		position_precision = scene.vf_render_lottie_settings.position_precision
+		color_precision = scene.vf_render_lottie_settings.color_precision
+		position_frames = scene.vf_render_lottie_settings.position_frames
+		color_frames = scene.vf_render_lottie_settings.color_frames
+		fill_color_string = scene.vf_render_lottie_settings.fill_color_string
+		stroke_color_string = scene.vf_render_lottie_settings.stroke_color_string
+		stroke_width_string = scene.vf_render_lottie_settings.stroke_width_string
 		
 		# Get active camera
 		cam = scene.camera
 		
 		# Get depsgraph
-		deps = bpy.context.evaluated_depsgraph_get()
+		deps = context.evaluated_depsgraph_get()
 		
 		# Get active object
-		obj = bpy.context.active_object
+		obj = context.active_object
 		
 		# Get file path
 		if self.filepath:
@@ -82,13 +82,13 @@ class VF_renderLottie(bpy.types.Operator):
 			filepath = scene.render.filepath
 		
 		# Support VF Autosave Render + Output Variables if plugin is installed and enabled
-		if bpy.context.preferences.addons['VF_autosaveRender']:
+		if context.preferences.addons['VF_autosaveRender']:
 			# Filter output file path if enabled
-			if bpy.context.preferences.addons['VF_autosaveRender'].preferences.render_output_variables:
+			if context.preferences.addons['VF_autosaveRender'].preferences.render_output_variables:
 				# Check if the serial variable is used
 				if '{serial}' in filepath:
-					filepath = filepath.replace("{serial}", format(bpy.context.scene.autosave_render_settings.output_file_serial, '04'))
-					bpy.context.scene.autosave_render_settings.output_file_serial += 1
+					filepath = filepath.replace("{serial}", format(scene.autosave_render_settings.output_file_serial, '04'))
+					scene.autosave_render_settings.output_file_serial += 1
 				
 				# Replace scene filepath output with the processed version
 				filepath = replaceVariables(filepath)
@@ -164,10 +164,13 @@ class VF_renderLottie(bpy.types.Operator):
 					# Add to array
 					bez_arr.append(xy)
 				
-				# Get fill data as Color object
-				rgb = linear2srgb(mesh.attributes[fill_color_string].data[pi].color)
-				# Replace with reduced precision array
-				rgb = [round(rgb[0], color_precision), round(rgb[1], color_precision), round(rgb[2], color_precision)]
+				# Get fill color data as array (Color object created when adding shape or keyframes)
+				if (fill_color_string in mesh.attributes):
+					rgb = linear2srgb(mesh.attributes[fill_color_string].data[pi].color)
+					# Replace with reduced precision array
+					rgb = [round(rgb[0], color_precision), round(rgb[1], color_precision), round(rgb[2], color_precision)]
+				else:
+					rgb = [1.0, 1.0, 1.0]
 				# Add to array
 				rgb_arr = []
 				rgb_arr.append(rgb[0])
@@ -186,12 +189,15 @@ class VF_renderLottie(bpy.types.Operator):
 					# Get color data and create fill
 					fill = group.add_shape(objects.Fill(Color(rgb[0], rgb[1], rgb[2])))
 					
-					# Store references to path and fill in dictionaries
+					# Store references in dictionaries
 					paths_dict[pi] = path
 					fills_dict[pi] = fill
 					
+					# Initialise history data
 					bez_hist.append(bez_arr)
+					bez_frame.append(frame)
 					rgb_hist.append(rgb_arr)
+					rgb_frame.append(frame)
 				
 				# Subsequent frames
 				else:
@@ -213,12 +219,12 @@ class VF_renderLottie(bpy.types.Operator):
 #						print("")
 						fill.color.add_keyframe(frame, Color(rgb[0], rgb[1], rgb[2]))
 				
-				# Store history references
+				# Update history references
 				bez_hist[pi] = bez_arr
 				rgb_hist[pi] = rgb_arr
 				
 				# Remove temp variables
-				del bez, bez_arr, rgb, rgb_arr
+				del path, fill, bez, bez_arr, rgb, rgb_arr
 		
 		# Export Lottie JSON file
 		export_lottie(an, filepath)
@@ -277,17 +283,118 @@ def linear2srgb(rgba):
 ###########################################################################
 # User preferences and UI rendering class
 
-class RenderLottiePreferences(bpy.types.AddonPreferences):
-	bl_idname = __name__
+#class RenderLottiePreferences(bpy.types.AddonPreferences):
+#	bl_idname = __name__
+#	
+#	proxy_resolutionMultiplier: bpy.props.IntProperty(
+#		name="Resolution Multiplier",
+#		description="Render engine to use for proxy renders",
+#		default=100)
+#	
+#	def draw(self, context):
+#		layout = self.layout
+#		layout.label(text="Addon Default Preferences")
+
+
+
+###########################################################################
+# Project settings and UI rendering class
+
+class RenderLottieSettings(bpy.types.PropertyGroup):
+	# Precision Variables
+	position_precision: bpy.props.IntProperty(
+		name="Position",
+		description="Pixel coordinate decimal places (lower values = smaller files)",
+		default=1,
+		step=1,
+		soft_min=1,
+		soft_max=4,
+		min=0,
+		max=8)
+	color_precision: bpy.props.IntProperty(
+		name="Color",
+		description="RGB value decimal places (lower values = smaller files)",
+		default=3,
+		step=1,
+		soft_min=2,
+		soft_max=6,
+		min=0,
+		max=8)
 	
-	proxy_resolutionMultiplier: bpy.props.IntProperty(
-		name="Resolution Multiplier",
-		description="Render engine to use for proxy renders",
-		default=100)
+	# Keyframe Variables
+	position_frames: bpy.props.IntProperty(
+		name="Position",
+		description="Keyframe spacing (higher values = smaller files)",
+		default=2,
+		step=1,
+		soft_min=1,
+		soft_max=10,
+		min=0,
+		max=30)
+	color_frames: bpy.props.IntProperty(
+		name="Color",
+		description="Keyframe spacing (higher values = smaller files)",
+		default=2,
+		step=1,
+		soft_min=1,
+		soft_max=10,
+		min=0,
+		max=30)
+	
+	# Attribute Strings
+	fill_color_string: bpy.props.StringProperty(
+		name="Fill Color",
+		description="Attribute name that controls polygon face fill color",
+		default="Lottie_Fill_Color",
+		maxlen=256)
+	stroke_color_string: bpy.props.StringProperty(
+		name="Stroke Color",
+		description="Attribute name that controls edge stroke color",
+		default="Lottie_Stroke_Color",
+		maxlen=256)
+	stroke_width_string: bpy.props.StringProperty(
+		name="Stroke Width",
+		description="Attribute name that controls edge stroke width",
+		default="Lottie_Stroke_Width",
+		maxlen=256)
+
+class RENDER_PT_render_lottie_panel(bpy.types.Panel):
+	bl_space_type = 'PROPERTIES'
+	bl_region_type = 'WINDOW'
+	bl_context = "render"
+	bl_category = 'Lottie'
+	bl_label = "Lottie"
+#	bl_idname = 'RENDER_PT_render_lottie_panel'
+	bl_order = 100
+	
+	@classmethod
+	def poll(cls, context):
+		return True
 	
 	def draw(self, context):
 		layout = self.layout
-		layout.label(text="Addon Default Preferences")
+		layout.use_property_decorate = False  # No animation
+		layout.use_property_split = True
+		
+		layout.label(text='Value Precision')
+		flow = layout.grid_flow(row_major=True, columns=0, even_columns=True, even_rows=True, align=False)
+		flow.prop(context.scene.vf_render_lottie_settings, 'position_precision')
+		flow.prop(context.scene.vf_render_lottie_settings, 'color_precision')
+		
+		layout.label(text='Keyframe Spacing')
+		flow = layout.grid_flow(row_major=True, columns=0, even_columns=True, even_rows=True, align=False)
+		flow.prop(context.scene.vf_render_lottie_settings, 'position_frames')
+		flow.prop(context.scene.vf_render_lottie_settings, 'color_frames')
+		
+		layout.label(text='Attribute Names')
+		flow = layout.grid_flow(row_major=True, columns=0, even_columns=True, even_rows=True, align=False)
+		flow.prop(context.scene.vf_render_lottie_settings, 'fill_color_string')
+		flow.prop(context.scene.vf_render_lottie_settings, 'stroke_color_string')
+		flow.prop(context.scene.vf_render_lottie_settings, 'stroke_width_string')
+		
+		layout.separator()
+		
+		layout.operator(VF_renderLottie.bl_idname, text='Render Lottie JSON', icon='FILE') # RENDER_ANIMATION
 
 
 
@@ -297,7 +404,7 @@ class RenderLottiePreferences(bpy.types.AddonPreferences):
 def vf_prepend_menu_renderLottie(self,context):
 	try:
 		layout = self.layout
-		layout.operator(VF_renderLottie.bl_idname, text="Render Lottie JSON", icon='FILE') # RENDER_ANIMATION
+		layout.operator(VF_renderLottie.bl_idname, text='Render Lottie JSON', icon='FILE') # RENDER_ANIMATION
 	except Exception as exc:
 		print(str(exc) + " | Error in Topbar Mt Render when adding to menu")
 
@@ -306,7 +413,8 @@ def vf_prepend_menu_renderLottie(self,context):
 ###########################################################################
 # Addon registration functions
 
-classes = (RenderLottiePreferences, VF_renderLottie)
+# Removed: RenderLottiePreferences
+classes = (VF_renderLottie, RenderLottieSettings, RENDER_PT_render_lottie_panel)
 
 addon_keymaps = []
 
@@ -314,6 +422,9 @@ def register():
 	# register classes
 	for cls in classes:
 		bpy.utils.register_class(cls)
+	# Settings reference
+	bpy.types.Scene.vf_render_lottie_settings = bpy.props.PointerProperty(type=RenderLottieSettings)
+	# Render menu button
 	bpy.types.TOPBAR_MT_render.prepend(vf_prepend_menu_renderLottie)
 	# handle the keymap
 	wm = bpy.context.window_manager
@@ -335,6 +446,9 @@ def unregister():
 	# unregister classes
 	for cls in reversed(classes):
 		bpy.utils.unregister_class(cls)
+	# Settings reference
+	del bpy.types.Scene.vf_render_lottie_settings
+	# Render menu button
 	bpy.types.TOPBAR_MT_render.remove(vf_prepend_menu_renderLottie)
 
 if __name__ == "__main__":
